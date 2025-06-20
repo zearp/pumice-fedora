@@ -9,7 +9,7 @@ It should work out of the box on most hardware. Cockpit is installed as well. Op
 
 I use Flatpak a lot so there are not many default apps installed. Just use the store to install what you need.
 
-While it should work on any Fedora and if using ```podmand``` maybe EL too (CentOS/Rocky/Alma) I've tested on Fedora 42 only as I got flaky results using ```podman```.
+While it should work on any Fedora and if using ```podman``` maybe EL too (CentOS/Rocky/Alma) I've tested on Fedora 42 only as I got flaky results using ```podman```.
 
 ## Initial setup
 ```
