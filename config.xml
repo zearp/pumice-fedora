@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="utf-8"?>
+<image schemaversion="7.5" name="Fedora">
+	<description type="system">
+		<author>zearp</author>
+		<contact>https://github.com/zearp/pumice-cosmic</contact>
+		<specification>Pumice Cosmic 42</specification>
+	</description>
+	<preferences>
+		<version>42</version>
+		<packagemanager>dnf5</packagemanager>
+		<locale>en_GB</locale>
+		<keytable>us</keytable>
+		<timezone>Europe/Amsterdam</timezone>
+		<release-version>42</release-version>
+	</preferences>
+	<repository type="rpm-md" alias="fedora" sourcetype="metalink">
+		<source path="https://mirrors.fedoraproject.org/metalink?repo=fedora-$releasever&amp;arch=$basearch">
+			<signing key="file:///usr/share/distribution-gpg-keys/fedora/RPM-GPG-KEY-fedora-$releasever-primary"/>
+		</source>
+	</repository>
+	<repository type="rpm-md" alias="updates" sourcetype="metalink">
+		<source path="https://mirrors.fedoraproject.org/metalink?repo=updates-released-f$releasever&amp;arch=$basearch">
+			<signing key="file:///usr/share/distribution-gpg-keys/fedora/RPM-GPG-KEY-fedora-$releasever-primary"/>
+		</source>
+	</repository>
+	<repository type="rpm-md" alias="fedora-cisco-openh264" sourcetype="metalink">
+		<source path="https://mirrors.fedoraproject.org/metalink?repo=fedora-cisco-openh264-$releasever&amp;arch=$basearch">
+			<signing key="file:///usr/share/distribution-gpg-keys/fedora/RPM-GPG-KEY-fedora-$releasever-primary"/>
+		</source>
+	</repository>
+	<repository type="rpm-md" alias="rpmfusion-free" sourcetype="mirrorlist">
+		<source path="https://mirrors.rpmfusion.org/mirrorlist?repo=free-fedora-$releasever&amp;arch=$basearch">
+			<signing key="file:///usr/share/distribution-gpg-keys/rpmfusion/RPM-GPG-KEY-rpmfusion-free-fedora-2020"/>
+		</source>
+	</repository>
+	<repository type="rpm-md" alias="rpmfusion-free-updates" sourcetype="mirrorlist">
+		<source path="https://mirrors.rpmfusion.org/mirrorlist?repo=free-fedora-updates-released-$releasever&amp;arch=$basearch">
+			<signing key="file:///usr/share/distribution-gpg-keys/rpmfusion/RPM-GPG-KEY-rpmfusion-free-fedora-2020"/>
+		</source>
+	</repository>
+	<repository type="rpm-md" alias="rpmfusion-nonfree" sourcetype="mirrorlist">
+		<source path="https://mirrors.rpmfusion.org/mirrorlist?repo=free-fedora-$releasever&amp;arch=$basearch">
+			<signing key="file:///usr/share/distribution-gpg-keys/rpmfusion/RPM-GPG-KEY-rpmfusion-nonfree-fedora-2020"/>
+		</source>
+	</repository>
+	<repository type="rpm-md" alias="rpmfusion-nonfree-updates" sourcetype="mirrorlist">
+		<source path="https://mirrors.rpmfusion.org/mirrorlist?repo=free-fedora-updates-released-$releasever&amp;arch=$basearch">
+			<signing key="file:///usr/share/distribution-gpg-keys/rpmfusion/RPM-GPG-KEY-rpmfusion-nonfree-fedora-2020"/>
+		</source>
+	</repository>
+	<profiles>
+		<profile name="Pumice" description="Pumice Cosmic 42"></profile>
+	</profiles>
+	<packages type="image" patternType="plusRecommended" profiles="Pumice">
+		<file name="iso-esp-excludes.yaml" target="image/exclude_files_efifatimage.yaml"/>
+		<ignore name="device-mapper-multipath"/>
+		<ignore name="fcoe-utils"/>
+		<ignore name="ffmpeg-free"/>
+		<ignore name="qemu-user-static"/>
+		<namedCollection name="anaconda-tools"/>
+		<namedCollection name="fonts"/>
+		<namedCollection name="guest-agents"/>
+		<namedCollection name="hardware-support"/>
+		<namedCollection name="networkmanager-submodules"/>
+		<namedCollection name="standard"/>
+		<package name="aajohan-comfortaa-fonts"/>
+		<package name="anaconda"/>
+		<package name="anaconda-install-env-deps"/>
+		<package name="anaconda-live"/>
+		<package name="btrfs-progs"/>
+		<package name="cockpit"/>
+		<package name="cockpit-files"/>
+		<package name="cockpit-packagekit"/>
+		<package name="cockpit-storaged"/>
+		<package name="cosmic-applets"/>
+		<package name="cosmic-app-library"/>
+		<package name="cosmic-bg"/>
+		<package name="cosmic-comp"/>
+		<package name="cosmic-config-fedora"/>
+		<package name="cosmic-edit"/>
+		<package name="cosmic-files"/>
+		<package name="cosmic-greeter"/>
+		<package name="cosmic-icon-theme"/>
+		<package name="cosmic-idle"/>
+		<package name="cosmic-launcher"/>
+		<package name="cosmic-notifications"/>
+		<package name="cosmic-osd"/>
+		<package name="cosmic-panel"/>
+		<package name="cosmic-player"/>
+		<package name="cosmic-randr"/>
+		<package name="cosmic-screenshot"/>
+		<package name="cosmic-session"/>
+		<package name="cosmic-settings"/>
+		<package name="cosmic-settings-daemon"/>
+		<package name="cosmic-store"/>
+		<package name="cosmic-term"/>
+		<package name="cosmic-wallpapers"/>
+		<package name="cosmic-workspaces"/>
+		<package name="dracut-live"/>
+		<package name="ffmpeg"/>
+		<package name="fstrm"/>
+		<package name="glibc-all-langpacks"/>
+		<package name="gnome-keyring-pam"/>
+		<package name="grub2-efi-x64" arch="x86_64"/>
+		<package name="grub2-efi-x64-cdboot" arch="x86_64"/>
+		<package name="grub2-efi-x64-modules" arch="x86_64"/>
+		<package name="grub2-pc" arch="x86_64"/>
+		<package name="grub2-pc-modules" arch="x86_64"/>
+		<package name="grubby"/>
+		<package name="initial-setup-gui-wayland-cosmic"/>
+		<package name="isomd5sum"/>
+		<package name="kernel"/>
+		<package name="kernel-core"/>
+		<package name="kernel-modules"/>
+		<package name="kernel-modules-extra"/>
+		<package name="libva-intel-media-driver"/>
+		<package name="livesys-scripts"/>
+		<package name="ncdu"/>
+		<package name="openssh"/>
+		<package name="openssh-clients"/>
+		<package name="openssh-server"/>
+		<package name="shim-signed-x64" arch="x86_64"/>
+		<package name="systemd-oomd-defaults"/>
+		<package name="systemd-resolved"/>
+		<package name="thermald"/>
+		<package name="tio"/>
+		<package name="udisks2-btrfs"/>
+		<package name="xdg-desktop-portal-cosmic"/>
+		<package name="zram-generator"/>
+		<package name="zsh"/>
+	</packages>
+	<preferences profiles="Pumice" arch="x86_64">
+		<type image="iso"
+			publisher="Pumice" volid="Pumice_Cosmic" application_id="Pumice_Cosmic"
+			primary="true" flags="dmsquash" filesystem="erofs" erofscompression="lzma,level=6" mediacheck="true"
+			firmware="uefi" efiparttable="gpt" efifatimagesize="30" kernelcmdline="quiet rhgb"
+			fscreateoptions="-Eall-fragments,fragdedupe=inode -C 1048576"
+			>
+			<bootloader name="grub2" grub_template="grub-x86.cfg.iso-template" console="console" timeout="10"/>
+		</type>
+	</preferences>
+	<packages type="bootstrap">
+		<package name="basesystem"/>
+		<package name="filesystem"/>
+	</packages>
+	<users profiles="Pumice">
+		<user name="root" groups="root" password="linux" home="/root" pwdformat="plain" />
+	</users>
+</image>
