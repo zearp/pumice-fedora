@@ -1,0 +1,804 @@
+#!/usr/bin/env bash
+#
+
+set -euo pipefail
+
+# We need root permissions.
+#
+if [[ $EUID -ne 0 ]]; then
+    exec sudo bash "$0" "$@"
+fi
+
+# Setup some logging.
+#
+LOG_FILE="/tmp/pumice-snapshots.log"
+: > "$LOG_FILE"
+
+log() {
+    local level="$1"; shift
+    echo "[$(date '+%H:%M:%S')] [$level] $*" | tee -a "$LOG_FILE"
+}
+
+log_cmd() {
+    log "CMD" "Running: $*"
+    if "$@" >> "$LOG_FILE" 2>&1; then
+        log "OK " "Success: $*"
+        return 0
+    else
+        local rc=$?
+        log "ERR" "Failed (exit $rc): $*"
+        return $rc
+    fi
+}
+
+log "INFO" "pumice-snapshots started"
+log "INFO" "Kernel: $(uname -r)"
+log "INFO" "Block devices:"
+lsblk -o NAME,FSTYPE,TYPE,SIZE,MOUNTPOINT >> "$LOG_FILE" 2>&1
+
+# All required binaries must be present.
+#
+REQUIRED_CMDS=(dialog btrfs cryptsetup findmnt blkid chroot snapper grub2-mkconfig)
+MISSING=()
+for cmd in "${REQUIRED_CMDS[@]}"; do
+    command -v "$cmd" &>/dev/null || MISSING+=("$cmd")
+done
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+    echo "ERROR: Missing required commands: ${MISSING[*]}" >&2
+    echo "These should be present on the Pumice ISO. Cannot continue." >&2
+    exit 1
+fi
+log "INFO" "Preflight OK — all required commands present"
+
+# Vars.
+#
+BACKTITLE="Pumice Snapshot Setup"
+TMPDIR_MOUNT=$(mktemp -d)
+LUKS_NAME=""
+LUKS_PART=""   # the raw LUKS block device (e.g. /dev/sda2)
+LUKS_OPENED_BY_US=false  # true only if we called cryptsetup open ourselves
+BTRFS_PART=""  # the btrfs device (plain partition or /dev/mapper/...)
+
+cleanup() {
+    log "INFO" "Cleanup: unmounting $TMPDIR_MOUNT"
+    umount -R "$TMPDIR_MOUNT" 2>/dev/null || true
+    if [[ -n "$LUKS_NAME" ]] && $LUKS_OPENED_BY_US; then
+        log "INFO" "Cleanup: closing LUKS device $LUKS_NAME"
+        cryptsetup close "$LUKS_NAME" 2>/dev/null || true
+    fi
+    rm -rf "$TMPDIR_MOUNT"
+    log "INFO" "pumice-snapshots finished. Log: $LOG_FILE"
+}
+trap cleanup EXIT
+
+die() {
+    log "ERR" "Fatal: $1"
+    dialog --backtitle "$BACKTITLE" \
+           --title "Error" \
+           --msgbox "\n$1\n\nSee log for details:\n$LOG_FILE" \
+           10 65
+    exit 1
+}
+
+info() {
+    dialog --backtitle "$BACKTITLE" --title "Info" --msgbox "\n$1" 8 62
+}
+
+show_log() {
+    dialog --backtitle "$BACKTITLE" \
+           --title "Debug Log — $LOG_FILE" \
+           --textbox "$LOG_FILE" \
+           30 80
+}
+
+# Detect installed btrfs partition.
+#
+detect_btrfs_partition() {
+    log "INFO" "Detecting btrfs partitions..."
+
+    local live_dev
+    live_dev=$(findmnt -n -o SOURCE / | sed 's/\[.*//' || echo "")
+    log "INFO" "Live environment device: ${live_dev:-unknown}"
+
+    local parts=()
+
+    # 1: Plain btrfs partitions.
+    #
+    while IFS= read -r dev; do
+        [[ "$dev" == "$live_dev" ]] && continue
+        local size
+        size=$(lsblk -no SIZE "$dev" 2>/dev/null | head -1 || echo "?")
+        log "INFO" "Found plain btrfs: $dev ($size)"
+        parts+=("$dev" "btrfs $size" off)
+    done < <(lsblk -lno NAME,FSTYPE,TYPE \
+             | awk '$2=="btrfs" && $3=="part" {print "/dev/"$1}' || true)
+
+    # 2: Unlocked LUKS mapper devices containing btrfs.
+    #
+    while IFS= read -r dev; do
+        [[ "$dev" == "$live_dev" ]] && continue
+        local size
+        size=$(lsblk -no SIZE "$dev" 2>/dev/null | head -1 || echo "?")
+        log "INFO" "Found LUKS mapper btrfs: $dev ($size)"
+        parts+=("$dev" "btrfs/LUKS $size" off)
+    done < <(lsblk -lno NAME,FSTYPE,TYPE \
+             | awk '$2=="btrfs" && $3=="dm" {print "/dev/mapper/"$1}' || true)
+
+    # 3: Locked LUKS partitions.
+    #
+    while IFS= read -r dev; do
+        local size
+        size=$(lsblk -no SIZE "$dev" 2>/dev/null | head -1 || echo "?")
+        log "INFO" "Found locked LUKS partition: $dev ($size)"
+        parts+=("$dev" "LUKS encrypted $size" off)
+    done < <(lsblk -lno NAME,FSTYPE,TYPE \
+             | awk '$2=="crypto_LUKS" && $3=="part" {print "/dev/"$1}' || true)
+
+    log "INFO" "Total candidates: $(( ${#parts[@]} / 3 ))"
+
+    if [[ ${#parts[@]} -eq 0 ]]; then
+        die "No btrfs or LUKS partitions found.\n\nMake sure the Anaconda installation is complete and the target disk is attached."
+    fi
+
+    exec 3>/tmp/pumice_input
+    dialog --backtitle "$BACKTITLE" \
+           --title "Select Installed Partition" \
+           --radiolist "\nSelect the partition of your installed Fedora system:\n(use Space to select, Enter to confirm)" \
+           16 65 8 \
+           "${parts[@]}" \
+           --output-fd 3 || die "No partition selected."
+    exec 3>&-
+
+    local selected
+    selected=$(tr -d '[:space:]' < /tmp/pumice_input)
+    rm -f /tmp/pumice_input
+    log "INFO" "User selected: $selected"
+
+    local fstype
+    fstype=$(blkid -o value -s TYPE "$selected" 2>/dev/null || echo "")
+    log "INFO" "Selected device fstype: $fstype"
+
+    if [[ "$fstype" == "crypto_LUKS" ]]; then
+        LUKS_PART="$selected"
+
+        # Check if this LUKS device is already open as Anaconda may have unlocked it.
+        #
+        local existing_name
+        existing_name=$(dmsetup ls --target crypt 2>/dev/null \
+                        | while read -r name _; do
+                            if cryptsetup status "$name" 2>/dev/null \
+                               | grep -q "device:.*${selected##/dev/}"; then
+                                echo "$name"
+                                break
+                            fi
+                          done || true)
+
+        if [[ -n "$existing_name" ]]; then
+            # Already open; reuse the existing mapper device. No passphrase needed.
+            #
+            LUKS_NAME="$existing_name"
+            BTRFS_PART="/dev/mapper/$LUKS_NAME"
+            log "INFO" "LUKS device $selected is already open as $BTRFS_PART — reusing."
+        else
+            log "INFO" "Device is locked LUKS, prompting for passphrase..."
+            LUKS_NAME="pumice-btrfs-$(date +%s)"
+
+            # Write passphrase directly from dialog into a named pipe that
+            # cryptsetup reads. No shell variable or temp file ever holds the
+            # passphrase, so nothing can corrupt or strip characters from it.
+            # dialog --output-fd 3 writes exactly what the user typed followed
+            # by a single newline; cryptsetup --key-file=- reads until EOF so
+            # the newline is harmless (it is not part of the key).
+            #
+            local fifo
+            fifo=$(mktemp -u /tmp/pumice_luks_XXXXXX)
+            mkfifo -m 600 "$fifo"
+
+            # Open cryptsetup in the background reading from the fifo
+            #
+            cryptsetup open "$selected" "$LUKS_NAME" --key-file="$fifo" &
+            local cs_pid=$!
+
+            # Write the passphrase into the fifo via dialog --output-fd.
+            #
+            exec 3>"$fifo"
+            dialog --backtitle "$BACKTITLE" \
+                   --title "LUKS Passphrase" \
+                   --passwordbox "\nEnter the disk encryption passphrase for:\n  $selected" \
+                   10 58 \
+                   --output-fd 3
+            local dlg_rc=$?
+            exec 3>&-
+
+            rm -f "$fifo"
+            wait "$cs_pid"
+            local cs_rc=$?
+
+            if [[ $dlg_rc -ne 0 ]]; then
+                die "No passphrase entered."
+            fi
+
+            log "INFO" "Attempting to open LUKS device $selected as $LUKS_NAME"
+            if [[ $cs_rc -ne 0 ]]; then
+                log "ERR" "cryptsetup open failed (exit $cs_rc)"
+                die "Failed to unlock $selected.\n\nCheck the passphrase and try again."
+            fi
+
+            BTRFS_PART="/dev/mapper/$LUKS_NAME"
+            LUKS_OPENED_BY_US=true
+            log "INFO" "LUKS opened: $BTRFS_PART"
+        fi
+
+        local inner_fstype
+        inner_fstype=$(blkid -o value -s TYPE "$BTRFS_PART" 2>/dev/null || echo "")
+        log "INFO" "Inner fstype: $inner_fstype"
+        [[ "$inner_fstype" == "btrfs" ]] || \
+            die "LUKS device does not contain a btrfs filesystem (found: ${inner_fstype:-none})."
+    else
+        BTRFS_PART="$selected"
+    fi
+
+    log "INFO" "Using btrfs device: $BTRFS_PART"
+}
+
+# Anaconda may leave the target disk's partitions mounted (e.g. under
+# /mnt/sysroot). Unmount everything on the selected disk before we start so
+# our own mounts don't collide with pre-existing ones.
+#
+unmount_target_disk() {
+    # Find the parent disk of the selected device.
+    # For /dev/sda3 or /dev/mapper/luks-... we walk up to the disk name.
+    #
+    local disk
+    if [[ -n "$LUKS_PART" ]]; then
+        disk=$(lsblk -no PKNAME "$LUKS_PART" 2>/dev/null | head -1)
+    else
+        disk=$(lsblk -no PKNAME "$BTRFS_PART" 2>/dev/null | head -1)
+    fi
+
+    if [[ -z "$disk" ]]; then
+        log "WARN" "Could not determine parent disk — skipping pre-unmount."
+        return 0
+    fi
+    disk="/dev/$disk"
+    log "INFO" "Target disk: $disk — checking for existing mounts..."
+
+    # Collect all block devices on that disk.
+    #
+    local devs=()
+    while IFS= read -r line; do
+        local _name _type
+        read -r _name _type <<< "$line"
+        case "$_type" in
+            part|disk) devs+=("/dev/$_name") ;;
+            crypt|lvm|dm) devs+=("/dev/mapper/$_name") ;;
+        esac
+    done < <(lsblk -lno NAME,TYPE "$disk" 2>/dev/null)
+
+    if [[ ${#devs[@]} -eq 0 ]]; then
+        log "INFO" "No child devices found on $disk."
+        return 0
+    fi
+
+    # Find all mounts whose source is one of our devices, sorted deepest first
+    # so nested mounts (e.g. /mnt/sysroot/boot/efi) come before their parents.
+    # Deduplicate targets with awk: Anaconda sometimes mounts the same physical
+    # device at both /mnt/sysroot/... and /mnt/sysimage/... paths. If /mnt/sysimage
+    # is a bind mount of /mnt/sysroot, those paths share the same kernel mount ID,
+    # so unmounting one also unmounts the other — listing it twice is noise.
+    #
+    local mounts=()
+    while IFS= read -r mp; do
+        mounts+=("$mp")
+    done < <(
+        findmnt -lno SOURCE,TARGET 2>/dev/null \
+        | while read -r src tgt; do
+            for dev in "${devs[@]}"; do
+                # Match exact device or btrfs [subvol] suffix: /dev/mapper/luks-...[/@].
+                #
+                if [[ "$src" == "$dev"* ]]; then
+                    echo "$tgt"
+                    break
+                fi
+            done
+          done \
+        | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2- \
+        | awk '!seen[$0]++'
+    )
+
+    if [[ ${#mounts[@]} -eq 0 ]]; then
+        log "INFO" "No existing mounts found for $disk — nothing to unmount."
+        return 0
+    fi
+
+    log "INFO" "Found ${#mounts[@]} mount(s) to unmount before proceeding:"
+    for mp in "${mounts[@]}"; do
+        log "INFO" "  $mp"
+    done
+
+    local failed=0
+    for mp in "${mounts[@]}"; do
+        # Never unmount the live environment itself.
+        #
+        [[ "$mp" == "/" ]] && continue
+        [[ "$mp" == "/run/initramfs/live"* ]] && continue
+        [[ "$mp" == "/run/rootfsbase"* ]] && continue
+
+        # A prior umount -R may have already swept this entry away.
+        #
+        if ! mountpoint -q "$mp" 2>/dev/null; then
+            log "INFO" "Skipping $mp — already unmounted"
+            continue
+        fi
+
+        log "INFO" "Unmounting $mp..."
+        if ! umount -R "$mp" 2>>"$LOG_FILE"; then
+            log "WARN" "Could not unmount $mp — will try lazy unmount..."
+            if ! umount -l "$mp" 2>>"$LOG_FILE"; then
+                # Re-check: sibling umount -R may have cleaned it up between first attempt and now.
+                #
+                if mountpoint -q "$mp" 2>/dev/null; then
+                    log "ERR" "Lazy unmount also failed: $mp"
+                    (( failed++ )) || true
+                else
+                    log "INFO" "$mp cleaned up by a previous recursive unmount — OK"
+                fi
+            fi
+        fi
+    done
+
+    if [[ $failed -gt 0 ]]; then
+        die "Could not unmount $failed mount(s) on $disk.\n\nSee the log for details. Try closing any file managers\nor terminals with that disk open and re-run."
+    fi
+
+    log "INFO" "Pre-unmount complete."
+}
+
+# Sets globals: NEEDS_RENAME, NEEDS_HOME_RENAME, NEEDS_SNAPPER.
+#
+NEEDS_RENAME=false
+NEEDS_HOME_RENAME=false
+NEEDS_SNAPPER=false
+
+verify_layout() {
+    log "INFO" "Verifying btrfs subvolume layout on $BTRFS_PART"
+
+    log_cmd mount -o subvolid=5 "$BTRFS_PART" "$TMPDIR_MOUNT" || \
+        die "Could not mount $BTRFS_PART at subvolid=5."
+
+    local subvols
+    subvols=$(btrfs subvolume list "$TMPDIR_MOUNT" 2>&1)
+    log "INFO" "Subvolume list:\n$subvols"
+
+    local names
+    names=$(echo "$subvols" | awk '{print $NF}')
+
+    log_cmd umount "$TMPDIR_MOUNT"
+
+    # Check rename need for root
+    #
+    if echo "$names" | grep -qx "root"; then
+        log "INFO" "Found 'root' subvolume, rename needed."
+        NEEDS_RENAME=true
+    elif echo "$names" | grep -qx "@"; then
+        log "INFO" "Root subvolume already named '@', no rename needed."
+        NEEDS_RENAME=false
+    else
+        log "ERR" "No 'root' or '@' subvolume found. Subvolumes: $names"
+        die "Could not find a 'root' or '@' subvolume on $BTRFS_PART.\n\nThis does not look like a standard Fedora installation.\n\nCheck the log for the full subvolume list."
+    fi
+
+    # Check rename need for home.
+    #
+    if echo "$names" | grep -qx "home"; then
+        log "INFO" "Found 'home' subvolume, rename to '@home' needed."
+        NEEDS_HOME_RENAME=true
+    elif echo "$names" | grep -qx "@home"; then
+        log "INFO" "Home subvolume already named '@home', no rename needed."
+        NEEDS_HOME_RENAME=false
+    else
+        log "INFO" "No 'home' or '@home' subvolume found — skipping home rename."
+        NEEDS_HOME_RENAME=false
+    fi
+
+    # Check snapper config on the installed system and try both subvol names.
+    #
+    log_cmd mount -o subvol=@ "$BTRFS_PART" "$TMPDIR_MOUNT" 2>/dev/null || \
+    log_cmd mount -o subvol=root "$BTRFS_PART" "$TMPDIR_MOUNT" || \
+        die "Could not mount root subvolume to check Snapper config."
+
+    if [[ -f "$TMPDIR_MOUNT/etc/snapper/configs/root" ]]; then
+        log "INFO" "Snapper config already exists on target, skipping."
+        NEEDS_SNAPPER=false
+    else
+        log "INFO" "No Snapper config found on target."
+        NEEDS_SNAPPER=true
+    fi
+
+    log_cmd umount "$TMPDIR_MOUNT"
+}
+
+# Confirm and rename.
+#
+confirm_rename() {
+    local luks_note=""
+    [[ -n "$LUKS_NAME" ]] && luks_note="\n  (LUKS device: $LUKS_NAME)"
+
+    dialog --backtitle "$BACKTITLE" \
+           --title "Confirm Rename" \
+           --yesno "\nReady to rename btrfs subvolumes on:\n\n  $BTRFS_PART$luks_note\n\n  root  →  @\n  home  →  @home  (if present)\n\nThis also updates fstab, crypttab, and GRUB on the installed system.\nBackups of edited files will be saved with a .pumice-backup suffix.\nNo data will be lost.\n\nProceed?" \
+           17 58 || { log "INFO" "User cancelled at confirm step."; exit 0; }
+}
+
+do_rename() {
+    log "INFO" "Starting subvolume rename on $BTRFS_PART"
+
+    log_cmd mount -o subvolid=5 "$BTRFS_PART" "$TMPDIR_MOUNT" || \
+        die "Failed to mount top-level subvolume."
+
+    log "INFO" "Creating @ as snapshot of root..."
+    log_cmd btrfs subvolume snapshot "$TMPDIR_MOUNT/root" "$TMPDIR_MOUNT/@" || \
+        die "Failed to create '@' snapshot from 'root'."
+
+    log "INFO" "Deleting old root subvolume..."
+    log_cmd btrfs subvolume delete "$TMPDIR_MOUNT/root" || \
+        die "Failed to delete old 'root' subvolume."
+
+    if $NEEDS_HOME_RENAME; then
+        log "INFO" "Creating @home as snapshot of home..."
+        log_cmd btrfs subvolume snapshot "$TMPDIR_MOUNT/home" "$TMPDIR_MOUNT/@home" || \
+            die "Failed to create '@home' snapshot from 'home'."
+
+        log "INFO" "Deleting old home subvolume..."
+        log_cmd btrfs subvolume delete "$TMPDIR_MOUNT/home" || \
+            die "Failed to delete old 'home' subvolume."
+    fi
+
+    log_cmd umount "$TMPDIR_MOUNT"
+
+    log "INFO" "Mounting @ subvolume to update fstab..."
+    log_cmd mount -o subvol=@ "$BTRFS_PART" "$TMPDIR_MOUNT" || \
+        die "Failed to mount '@' subvolume."
+
+    # Setup fstab.
+    #
+    local fstab="$TMPDIR_MOUNT/etc/fstab"
+    [[ -f "$fstab" ]] || die "Could not find /etc/fstab on the installed system."
+
+    log "INFO" "fstab before edit:"
+    cat "$fstab" >> "$LOG_FILE"
+
+    log_cmd cp "$fstab" "${fstab}.pumice-backup"
+
+    # Replace subvol=root with subvol=@ and subvol=home with subvol=@home.
+    #
+    sed -i 's|subvol=root\b|subvol=@|g' "$fstab"
+    if $NEEDS_HOME_RENAME; then
+        sed -i 's|subvol=home\b|subvol=@home|g' "$fstab"
+    fi
+
+    # Ensure the UUID on the btrfs line matches what blkid reports.
+    #
+    local btrfs_uuid
+    btrfs_uuid=$(blkid -o value -s UUID "$BTRFS_PART" 2>/dev/null || echo "")
+    if [[ -n "$btrfs_uuid" ]]; then
+        log "INFO" "btrfs UUID: $btrfs_uuid"
+        # Only rewrite lines that already reference a UUID= for a btrfs mount as this avoids touching swap or EFI lines.
+        #
+        sed -i -E "s|^(UUID=[^ \t]+)([[:space:]]+/[[:space:]]+btrfs[[:space:]])|\
+UUID=${btrfs_uuid}\2|g" "$fstab"
+    else
+        log "WARN" "Could not determine btrfs UUID — skipping UUID correction in fstab."
+    fi
+
+    log "INFO" "fstab after edit:"
+    cat "$fstab" >> "$LOG_FILE"
+
+    # Setup crypttab.
+    #
+    local crypttab="$TMPDIR_MOUNT/etc/crypttab"
+    if [[ -n "$LUKS_PART" ]] && [[ -f "$crypttab" ]]; then
+        log "INFO" "crypttab before edit:"
+        cat "$crypttab" >> "$LOG_FILE"
+
+        log_cmd cp "$crypttab" "${crypttab}.pumice-backup"
+
+        local luks_uuid
+        luks_uuid=$(blkid -o value -s UUID "$LUKS_PART" 2>/dev/null || echo "")
+        if [[ -n "$luks_uuid" ]]; then
+            log "INFO" "LUKS partition UUID: $luks_uuid"
+            # Update any existing UUID= reference in crypttab to the correct one.
+            # crypttab format: <name>  <device>  <keyfile>  <options>
+            # The device field may be UUID=... or /dev/disk/by-uuid/...
+            #
+            sed -i -E \
+                "s|UUID=[0-9a-fA-F-]+|UUID=${luks_uuid}|g;
+                 s|/dev/disk/by-uuid/[0-9a-fA-F-]+|/dev/disk/by-uuid/${luks_uuid}|g" \
+                "$crypttab"
+        else
+            log "WARN" "Could not determine LUKS UUID — skipping UUID correction in crypttab."
+        fi
+
+        log "INFO" "crypttab after edit:"
+        cat "$crypttab" >> "$LOG_FILE"
+    elif [[ -n "$LUKS_PART" ]]; then
+        log "WARN" "LUKS installation but no crypttab found — skipping crypttab update."
+    else
+        log "INFO" "Plain btrfs installation — crypttab update not needed."
+    fi
+
+    log_cmd umount "$TMPDIR_MOUNT"
+    log "INFO" "Subvolume rename and config file updates complete."
+}
+
+# Fix boor parameters for luks and grub.
+#
+fix_luks_boot() {
+    log "INFO" "Fixing GRUB and initramfs LUKS/subvolume boot parameters..."
+
+    log_cmd mount -o subvol=@ "$BTRFS_PART" "$TMPDIR_MOUNT" || \
+        die "Could not mount '@' for GRUB fix."
+
+    for d in proc sys dev run; do
+        log_cmd mount --bind /$d "$TMPDIR_MOUNT/$d"
+    done
+
+    # Check /etc/default/grub.
+    #
+    local grub_default="$TMPDIR_MOUNT/etc/default/grub"
+    if [[ -f "$grub_default" ]]; then
+        log "INFO" "GRUB default before edit:"
+        cat "$grub_default" >> "$LOG_FILE"
+        log_cmd cp "$grub_default" "${grub_default}.pumice-backup"
+
+        # 1: Ensure rootflags=subvol=@ is present in GRUB_CMDLINE_LINUX.
+        #
+        if grep -q 'GRUB_CMDLINE_LINUX' "$grub_default"; then
+            # Replace any existing subvol=<name> kernel arg.
+            #
+            sed -i -E 's|subvol=[^" \t]+|subvol=@|g' "$grub_default"
+            # If no subvol= arg existed at all, inject it.
+            #
+            if ! grep -q 'subvol=@' "$grub_default"; then
+                sed -i -E \
+                    's|(GRUB_CMDLINE_LINUX="[^"]*)(")|\1 rootflags=subvol=@\2|' \
+                    "$grub_default"
+            fi
+        fi
+
+        # 2: Ensure rd.luks.uuid=<uuid> is correct for LUKS installs.
+        #
+        if [[ -n "$LUKS_PART" ]]; then
+            local luks_uuid
+            luks_uuid=$(blkid -o value -s UUID "$LUKS_PART" 2>/dev/null || echo "")
+            if [[ -n "$luks_uuid" ]]; then
+                log "INFO" "Setting rd.luks.uuid=luks-$luks_uuid in GRUB_CMDLINE_LINUX"
+                if grep -q 'rd\.luks\.uuid=' "$grub_default"; then
+                    # Replace the existing value regardless of whether it has the luks- prefix or not.
+                    #
+                    sed -i -E \
+                        "s|rd\.luks\.uuid=(luks-)?[0-9a-fA-F-]+|rd.luks.uuid=luks-${luks_uuid}|g" \
+                        "$grub_default"
+                else
+                    sed -i -E \
+                        "s|(GRUB_CMDLINE_LINUX=\"[^\"]*)(\")|\1 rd.luks.uuid=luks-${luks_uuid}\2|" \
+                        "$grub_default"
+                fi
+            else
+                log "WARN" "Could not determine LUKS UUID — skipping rd.luks.uuid in GRUB."
+            fi
+        fi
+
+        log "INFO" "GRUB default after edit:"
+        cat "$grub_default" >> "$LOG_FILE"
+    else
+        log "WARN" "/etc/default/grub not found — skipping."
+    fi
+
+    # /boot is a separate partition. Mount it now so we can patch BLS entries
+    # and run grub2-mkconfig. Both need the kernels to be visible.
+    #
+    local boot_uuid
+    boot_uuid=$(awk '$2=="/boot" && $3=="ext4" {
+                    match($1,/UUID=([^ ]+)/,a); print a[1]}' \
+                "$TMPDIR_MOUNT/etc/fstab" 2>/dev/null || echo "")
+    if [[ -n "$boot_uuid" ]]; then
+        local boot_dev
+        boot_dev=$(blkid -l -o device -t UUID="$boot_uuid" 2>/dev/null || echo "")
+        if [[ -n "$boot_dev" ]]; then
+            log "INFO" "Mounting /boot ($boot_dev) for grub2-mkconfig..."
+            if log_cmd mount "$boot_dev" "$TMPDIR_MOUNT/boot"; then
+                # Also mount the EFI partition if present.
+                local efi_uuid
+                efi_uuid=$(awk '$2=="/boot/efi" {
+                                match($1,/UUID=([^ ]+)/,a); print a[1]}' \
+                           "$TMPDIR_MOUNT/etc/fstab" 2>/dev/null || echo "")
+                if [[ -n "$efi_uuid" ]]; then
+                    local efi_dev
+                    efi_dev=$(blkid -l -o device -t UUID="$efi_uuid" 2>/dev/null || echo "")
+                    if [[ -n "$efi_dev" ]]; then
+                        log "INFO" "Mounting /boot/efi ($efi_dev)..."
+                        log_cmd mount "$efi_dev" "$TMPDIR_MOUNT/boot/efi" || \
+                            log "WARN" "Could not mount /boot/efi — EFI grub.cfg may be skipped."
+                    fi
+                fi
+            else
+                log "WARN" "Could not mount /boot — grub2-mkconfig may not find kernels."
+            fi
+        else
+            log "WARN" "Could not resolve /boot device from UUID=$boot_uuid."
+        fi
+    else
+        log "INFO" "/boot not a separate partition in fstab — no extra mount needed."
+    fi
+
+    # With GRUB_ENABLE_BLSCFG=true (Fedora default) the kernel cmdline lives
+    # in /boot/loader/entries/*.conf — one file per installed kernel.
+    # grub2-mkconfig in BLS mode does NOT rewrite the options= lines in these
+    # files, so patching /etc/default/grub alone has no effect on what the
+    # kernel actually receives at boot. We must patch the entries directly.
+    #
+    local bls_dir="$TMPDIR_MOUNT/boot/loader/entries"
+    if [[ -d "$bls_dir" ]]; then
+        local bls_count=0
+        while IFS= read -r entry; do
+            log "INFO" "Patching BLS entry: $entry"
+            log_cmd cp "$entry" "${entry}.pumice-backup"
+
+            # Replace subvol=<anything> with subvol=@ on the options= line.
+            sed -i -E 's|(^options[[:space:]].*)subvol=[^[:space:]]+|\1subvol=@|' "$entry"
+
+            # Inject rootflags=subvol=@ if no subvol= was present at all.
+            if ! grep -q 'subvol=@' "$entry"; then
+                sed -i -E 's|(^options[[:space:]].*)$|\1 rootflags=subvol=@|' "$entry"
+            fi
+
+            # Fix rd.luks.uuid if this is a LUKS install.
+            if [[ -n "$LUKS_PART" ]]; then
+                local luks_uuid
+                luks_uuid=$(blkid -o value -s UUID "$LUKS_PART" 2>/dev/null || echo "")
+                if [[ -n "$luks_uuid" ]]; then
+                    sed -i -E \
+                        "s|rd\.luks\.uuid=(luks-)?[0-9a-fA-F-]+|rd.luks.uuid=luks-${luks_uuid}|g" \
+                        "$entry"
+                fi
+            fi
+
+            log "INFO" "BLS entry after edit:"
+            grep '^options' "$entry" >> "$LOG_FILE"
+            (( bls_count++ )) || true
+        done < <(find "$bls_dir" -maxdepth 1 -name '*.conf' | sort)
+        log "INFO" "Patched $bls_count BLS entry/entries."
+    else
+        log "WARN" "/boot/loader/entries not found — BLS patching skipped (non-BLS system or /boot not mounted)."
+    fi
+
+    # Regenerate grub.cfg.
+    #
+    local grub_cfg=""
+    for candidate in \
+        "$TMPDIR_MOUNT/boot/grub2/grub.cfg" \
+        "$TMPDIR_MOUNT/boot/efi/EFI/fedora/grub.cfg"
+    do
+        if [[ -f "$candidate" ]]; then
+            grub_cfg="$candidate"
+            break
+        fi
+    done
+
+    if [[ -n "$grub_cfg" ]]; then
+        log "INFO" "Regenerating $grub_cfg via grub2-mkconfig..."
+        log_cmd cp "$grub_cfg" "${grub_cfg}.pumice-backup"
+        local chroot_cfg="${grub_cfg#"$TMPDIR_MOUNT"}"
+        log_cmd chroot "$TMPDIR_MOUNT" grub2-mkconfig -o "$chroot_cfg" || \
+            log "WARN" "grub2-mkconfig failed — grub.cfg may need manual regeneration."
+    else
+        log "WARN" "Could not locate grub.cfg — skipping grub2-mkconfig."
+    fi
+
+    # Reset grubenv and remove any stale entries.
+    #
+    for candidate in \
+        "$TMPDIR_MOUNT/boot/grub2/grubenv" \
+        "$TMPDIR_MOUNT/boot/efi/EFI/fedora/grubenv"
+    do
+        if [[ -f "$candidate" ]]; then
+            log "INFO" "Resetting grubenv: $candidate"
+            log_cmd chroot "$TMPDIR_MOUNT" grub2-editenv \
+                "${candidate#$TMPDIR_MOUNT}" unset saved_entry kernelopts \
+                2>/dev/null || log "WARN" "grub2-editenv failed — grubenv untouched."
+            break
+        fi
+    done
+
+    log_cmd umount -R "$TMPDIR_MOUNT"
+    log "INFO" "GRUB/boot parameter fix complete."
+}
+
+# Optional snapper setup.
+#
+ask_snapper() {
+    dialog --backtitle "$BACKTITLE" \
+           --title "Snapper Setup" \
+           --yesno "\nWould you like to set up Snapper for automatic snapshots?\n\nThis will:\n  • Create a snapper config for /\n  • Enable snapper-timeline and snapper-cleanup timers" \
+           11 58
+}
+
+do_snapper() {
+    log "INFO" "Setting up Snapper in chroot..."
+
+    log_cmd mount -o subvol=@ "$BTRFS_PART" "$TMPDIR_MOUNT" || \
+        die "Could not mount installed system for Snapper setup."
+
+    for d in proc sys dev run; do
+        log_cmd mount --bind /$d "$TMPDIR_MOUNT/$d"
+    done
+
+    log "INFO" "Creating snapper root config..."
+    log_cmd chroot "$TMPDIR_MOUNT" snapper --no-dbus -c root create-config / || \
+        die "Failed to create Snapper config.\n\nIs snapper installed on the target system?"
+
+    log "INFO" "Enabling snapper timers..."
+    log_cmd chroot "$TMPDIR_MOUNT" systemctl enable --no-reload snapper-timeline.timer
+    log_cmd chroot "$TMPDIR_MOUNT" systemctl enable --no-reload snapper-cleanup.timer
+
+    log_cmd umount -R "$TMPDIR_MOUNT"
+    log "INFO" "Snapper setup complete."
+}
+
+# Main flow.
+#
+dialog --backtitle "$BACKTITLE" \
+       --title "Welcome" \
+       --msgbox "\nWelcome to Pumice Snapshot Setup.\n\nThis tool renames the btrfs root subvolume from 'root' to '@', making it compatible with Timeshift and Snapper. It also updates fstab, crypttab, and GRUB to use the correct labels and disk IDs. Supports plain and LUKS-encrypted installations.\n\n⚠  IMPORTANT: Only run this from the Pumice live environment, never from an installed and running system.\n\nUse cases:\n  • After a fresh Anaconda install, before rebooting\n  • Boot the live ISO on an existing install to fix labels retroactively\n\nLog file: $LOG_FILE" \
+       18 65
+
+detect_btrfs_partition
+unmount_target_disk
+verify_layout
+
+SETUP_SNAPPER=false
+
+if $NEEDS_RENAME; then
+    confirm_rename
+    do_rename
+    fix_luks_boot
+    dialog --backtitle "$BACKTITLE" \
+           --title "Rename Complete" \
+           --msgbox "\nSubvolume successfully renamed to '@'.\nfstab, crypttab, and GRUB have been updated." \
+           9 55
+fi
+
+if $NEEDS_SNAPPER; then
+    if ask_snapper; then
+        SETUP_SNAPPER=true
+        do_snapper
+        dialog --backtitle "$BACKTITLE" \
+               --title "Snapper Complete" \
+               --msgbox "\nSnapper configured with automatic timeline snapshots enabled." \
+               8 55
+    else
+        info "Snapper setup skipped.\n\nYou can re-run this tool later to set up Snapper."
+    fi
+fi
+
+if ! $NEEDS_RENAME && ! $NEEDS_SNAPPER; then
+    info "Labels are already correct and Snapper is already configured.\n\nNothing to do!"
+    exit 0
+fi
+
+# Finishing up.
+#
+DONE_MSG="All done!"
+$NEEDS_RENAME  && DONE_MSG="$DONE_MSG\n  ✓ Subvolumes renamed (root→@ $(if $NEEDS_HOME_RENAME; then echo ', home→@home'; fi)), fstab/crypttab/GRUB updated."
+$SETUP_SNAPPER && DONE_MSG="$DONE_MSG\n  ✓ Snapper configured with timeline snapshots."
+DONE_MSG="$DONE_MSG\n\nYou can now reboot into your new Pumice system.\nTimeshift and/or Snapper will work out of the box.\n\nLog saved to: $LOG_FILE"
+
+dialog --backtitle "$BACKTITLE" \
+       --title "Complete" \
+       --yesno "\n$DONE_MSG\n\nView the log before closing?" \
+       17 65 && show_log
+
+clear
+echo "Log saved to: $LOG_FILE"
+echo "Reboot when ready..."
