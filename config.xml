@@ -152,7 +152,6 @@
 		<package name="mc"/>
 		<package name="mesa-vulkan-drivers"/>
 		<package name="microcode_ctl"/>
-		<package name="mpv"/>
 		<package name="mozilla-openh264"/>
 		<package name="nano"/>
 		<package name="nautilus"/>
