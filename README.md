@@ -108,3 +108,8 @@ sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.ta
 - Read the ```kiwi``` docs: https://osinside.github.io/kiwi/image_description/elements.html
 - On firstboot the file ```/etc/rc.d/rc.local``` is executed to clean up and change settings and then removes itself
 - By changing the default boot target to text mode (```sudo systemctl set-default multi-user.target```) you can free up some resources for server usage.
+
+## Upstream kiwi descriptions:
+- https://forge.fedoraproject.org/releng/kiwi-descriptions
+- https://git.resf.org/sig_core/rocky-kiwi-descriptions
+- https://gitlab.com/CentOS/AltImages/releng/kiwi-descriptions
