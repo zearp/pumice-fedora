@@ -116,7 +116,6 @@
 		<package name="gnome-control-center"/>
 		<package name="gnome-disk-utility"/>
 		<package name="gnome-extensions-app"/>
-		<package name="gnome-keyring"/>
 		<package name="gnome-session-wayland-session"/>
 		<package name="gnome-shell-extension-appindicator"/>
 		<package name="gnome-shell-extension-blur-my-shell"/>
@@ -170,7 +169,6 @@
 		<package name="radeontop"/>
 		<package name="ripgrep"/>
 		<package name="screen"/>
-		<package name="seahorse"/>
 		<package name="selinux-policy"/>
 		<package name="setroubleshoot-server"/>
 		<package name="shim-signed-x64"/>
@@ -179,7 +177,6 @@
 		<package name="telnet"/>
 		<package name="thermald"/>
 		<package name="tio"/>
-		<package name="udisks2-btrfs"/>
 		<package name="vulkan-tools"/>
 		<package name="wavemon"/>
 		<package name="yt-dlp"/>
