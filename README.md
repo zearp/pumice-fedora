@@ -1,7 +1,7 @@
-# Pumice Fedora 44
+# Pumice Fedora 45
 ![pumice-penguin](https://github.com/zearp/pumice-fedora/blob/main/pumice-penguin.jpg?raw=true)
 
-This repo has a simplified version of the Fedora kiwi description repo found [here](https://pagure.io/fedora-kiwi-descriptions/). I've just simplified it to produce an offline installable desktop with a small selection of software running Gnome with a few extensions. It is easy to modify and expand upon. I have tested this on Fedora 44 and Rocky/RHEL 10 and Ubuntu 26.04 hosts but building the iso should work on any distro with ```podman``` installed. It will download a Fedora container to build the iso in. 
+This repo has a simplified version of the Fedora kiwi description repo found [here](https://pagure.io/fedora-kiwi-descriptions/). I've just simplified it to produce an offline installable desktop with a small selection of software running Gnome with a few extensions. It is easy to modify and expand upon. I have tested this on Fedora 45 and Rocky/RHEL 10 and Ubuntu 26.04 hosts but building the iso should work on any distro with ```podman``` installed. It will download a Fedora container to build the iso in. 
 
 ## Building the iso
 Install ```podman``` and ```git``` as we need both and create a cache folder for kiwi, this will speed up rebuilds.
@@ -20,7 +20,7 @@ sudo setenforce permissive
 ```
 Download and enter the Fedora container and install some needed packages. You can skip this step when on Fedora but if you do make sure to install packages listed below like ```kiwi``` and ```dosfstools``` if not already installed.
 ```
-sudo podman run --privileged --rm -it --network=host -v /dev:/dev -v $PWD:/code:z -v /var/cache/kiwi:/var/cache/kiwi:z -w /code quay.io/fedora/fedora:44-x86_64 /bin/bash
+sudo podman run --privileged --rm -it --network=host -v /dev:/dev -v $PWD:/code:z -v /var/cache/kiwi:/var/cache/kiwi:z -w /code quay.io/fedora/fedora:45-x86_64 /bin/bash
 ```
 ```
 dnf -y install kiwi policycoreutils dosfstools erofs-utils isomd5sum qemu-img xorriso nano
@@ -52,13 +52,13 @@ Remove unused dependencies/orphans:
 ```
 sudo dnf autoremove
 ```
-To update to a new release, from say 44 to 45 do the following:
+To update to a new release, from say 45 to 46 do the following:
 ```
 sudo dnf --refresh update
 ```
 Run the following command but if there were kernel updates reboot the system first and then run:
 ```
-sudo dnf system-upgrade download --releasever=45
+sudo dnf system-upgrade download --releasever=46
 ```
 Please check [this](https://docs.fedoraproject.org/en-US/quick-docs/upgrading-fedora-offline/) page as well before upgrading to a new major version.
 

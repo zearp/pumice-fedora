@@ -56,6 +56,23 @@ dconf update
 #
 flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
+#=======================================
+# add shell extensions not found in default repo
+#---------------------------------------
+gnome_shell_version=$(gnome-shell --version | grep -oE '[0-9]+' | head -1)
+
+for uuid in \
+    weatheroclock@CleoMenezesJr.github.io \
+; do
+    download_path=$(curl -sS \
+        "https://extensions.gnome.org/extension-info/?uuid=${uuid}&shell_version=${gnome_shell_version}" \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['download_url'])")
+    curl -sS -L -o /tmp/gnome-extension.zip \
+        "https://extensions.gnome.org${download_path}"
+    HOME=/etc/skel gnome-extensions install --print-uuid /tmp/gnome-extension.zip
+    rm -f /tmp/gnome-extension.zip
+done
+
 # rpmfusion stuff
 #
 dnf -y --nogpgcheck install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm

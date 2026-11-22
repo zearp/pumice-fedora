@@ -101,7 +101,7 @@ sleep-inactive-ac-timeout=7200
 [org/gnome/shell]
 always-show-log-out=true
 app-picker-layout=['']
-enabled-extensions=['blur-my-shell@aunetx', 'no-overview@fthx', 'weatheroclock@CleoMenezesJr.github.io', 'just-perfection-desktop@just-perfection', 'caffeine@patapon.info', 'dash-to-dock@micxgx.gmail.com', 'appindicatorsupport@rgcjonas.gmail.com', 'gamemodeshellextension@trsnaqe.com']
+enabled-extensions=['blur-my-shell@aunetx', 'no-overview@fthx', 'weatheroclock@CleoMenezesJr.github.io', 'just-perfection-desktop@just-perfection', 'caffeine@patapon.info', 'dash-to-dock@micxgx.gmail.com', 'appindicatorsupport@rgcjonas.gmail.com']
 favorite-apps=['org.gnome.Nautilus.desktop', 'org.gnome.Ptyxis.desktop', 'org.mozilla.firefox.desktop', 'org.gnome.Software.desktop', 'org.gnome.Settings.desktop', 'anaconda.desktop']
 
 [org/gnome/shell/extensions/weather-oclock]

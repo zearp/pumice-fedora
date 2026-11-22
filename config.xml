@@ -3,15 +3,15 @@
 	<description type="system">
 		<author>zearp</author>
 		<contact>https://github.com/zearp/pumice-fedora</contact>
-		<specification>Fedora Linux 44</specification>
+		<specification>Fedora Linux 45</specification>
 	</description>
 	<preferences>
-		<version>44</version>
+		<version>45</version>
 		<packagemanager>dnf5</packagemanager>
 		<locale>en_GB</locale>
 		<keytable>us</keytable>
 		<timezone>Europe/Amsterdam</timezone>
-		<release-version>44</release-version>
+		<release-version>45</release-version>
 	</preferences>
 	<repository type="rpm-md" alias="fedora" sourcetype="metalink">
 		<source path="https://mirrors.fedoraproject.org/metalink?repo=fedora-$releasever&amp;arch=$basearch">
